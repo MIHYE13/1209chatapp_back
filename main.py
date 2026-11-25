@@ -10,21 +10,16 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
 
-ROOT = Path(__file__).resolve().parents[2]
-WEB_DIR = ROOT / "App" / "Web"
-DATA_DIR = ROOT / "App" / "Api" / "data"
-UPLOAD_DIR = DATA_DIR / "uploads"
-DB_PATH = DATA_DIR / "science_collab.db"
-ENV_PATHS = [ROOT / ".env.local", ROOT / ".env.firebase.local"]
-
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+API_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT_CANDIDATE = API_DIR.parents[1]
+PROJECT_ROOT = PROJECT_ROOT_CANDIDATE if (PROJECT_ROOT_CANDIDATE / "App").exists() else API_DIR
+ENV_PATHS = [PROJECT_ROOT / ".env.local", PROJECT_ROOT / ".env.firebase.local"]
 
 
 def load_local_env() -> None:
@@ -42,6 +37,13 @@ def load_local_env() -> None:
 
 load_local_env()
 
+DATA_DIR = Path(os.getenv("APP_DATA_DIR", str(API_DIR / "data"))).resolve()
+UPLOAD_DIR = DATA_DIR / "uploads"
+DB_PATH = DATA_DIR / "science_collab.db"
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
 ROLES = ["이끄미", "기록이", "나누미", "지키미"]
 ALLOWED_FILE_TYPES = {
     "image/jpeg": ".jpg",
@@ -51,7 +53,21 @@ ALLOWED_FILE_TYPES = {
 }
 MAX_FILE_BYTES = 5 * 1024 * 1024
 
-app = FastAPI(title="과학 모둠 탐구실", version="0.1.0")
+app = FastAPI(title="과학 모둠 탐구실 API", version="0.2.0")
+
+configured_origins = [
+    origin.strip().rstrip("/")
+    for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
+    if origin.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=configured_origins,
+    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1|10\.[0-9.]+|192\.168\.[0-9.]+):[0-9]+$",
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Teacher-Code"],
+)
 
 
 def db() -> sqlite3.Connection:
@@ -224,6 +240,11 @@ class FeedbackPublishBody(BaseModel):
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/")
+def service_info() -> dict[str, str]:
+    return {"service": "science-collab-api", "status": "ok", "docs": "/docs"}
 
 
 @app.get("/api/activity/{code}")
@@ -675,9 +696,3 @@ async def publish_feedback(
 
 
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
-app.mount("/assets", StaticFiles(directory=WEB_DIR), name="assets")
-
-
-@app.get("/{path:path}")
-def frontend(path: str = "") -> FileResponse:
-    return FileResponse(WEB_DIR / "index.html")
