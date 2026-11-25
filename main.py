@@ -65,7 +65,7 @@ app.add_middleware(
     allow_origins=configured_origins,
     allow_origin_regex=r"^http://(localhost|127\.0\.0\.1|10\.[0-9.]+|192\.168\.[0-9.]+):[0-9]+$",
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Teacher-Code"],
 )
 
@@ -237,6 +237,10 @@ class FeedbackPublishBody(BaseModel):
     content: str = Field(min_length=10, max_length=1500)
 
 
+class StudentGroupUpdateBody(BaseModel):
+    group_no: int = Field(ge=1, le=6)
+
+
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -268,6 +272,12 @@ def login(body: LoginBody) -> dict[str, Any]:
             connection.execute("UPDATE students SET session_token = ? WHERE id = ?", (token, existing["id"]))
             role = existing["role"]
         else:
+            same_name = connection.execute(
+                "SELECT group_no FROM students WHERE activity_id = ? AND name = ? ORDER BY group_no",
+                (activity["id"], clean_name),
+            ).fetchall()
+            if len(same_name) == 1:
+                raise HTTPException(400, f"교사가 배정한 {same_name[0]['group_no']}모둠으로 로그인해 주세요.")
             count = connection.execute(
                 "SELECT COUNT(*) FROM students WHERE activity_id = ? AND group_no = ?",
                 (activity["id"], body.group_no),
@@ -555,6 +565,15 @@ def teacher_authorized(code: str | None) -> None:
         raise HTTPException(403, "교사 코드를 확인해 주세요.")
 
 
+def rebalance_roles(connection: sqlite3.Connection, activity_id: int, group_no: int) -> None:
+    students = connection.execute(
+        "SELECT id FROM students WHERE activity_id = ? AND group_no = ? ORDER BY id",
+        (activity_id, group_no),
+    ).fetchall()
+    for index, student in enumerate(students):
+        connection.execute("UPDATE students SET role = ? WHERE id = ?", (ROLES[index % len(ROLES)], student["id"]))
+
+
 @app.get("/api/teacher/overview/{activity_code}")
 def teacher_overview(activity_code: str, x_teacher_code: str | None = Header(default=None)) -> dict[str, Any]:
     teacher_authorized(x_teacher_code)
@@ -563,7 +582,7 @@ def teacher_overview(activity_code: str, x_teacher_code: str | None = Header(def
     with db() as connection:
         for group_no in range(1, 7):
             members = connection.execute(
-                "SELECT name, role FROM students WHERE activity_id = ? AND group_no = ? ORDER BY id",
+                "SELECT id, name, role, group_no FROM students WHERE activity_id = ? AND group_no = ? ORDER BY id",
                 (activity["id"], group_no),
             ).fetchall()
             messages = connection.execute(
@@ -588,6 +607,99 @@ def teacher_overview(activity_code: str, x_teacher_code: str | None = Header(def
                 "feedback": serialize_feedback(feedback) if feedback else None,
             })
     return {"activity": activity_payload(activity), "groups": groups}
+
+
+@app.put("/api/teacher/students/{student_id}")
+async def update_student_group(
+    student_id: int,
+    body: StudentGroupUpdateBody,
+    x_teacher_code: str | None = Header(default=None),
+) -> dict[str, Any]:
+    teacher_authorized(x_teacher_code)
+    with db() as connection:
+        student = connection.execute("SELECT * FROM students WHERE id = ?", (student_id,)).fetchone()
+        if not student:
+            raise HTTPException(404, "등록된 학생을 찾을 수 없습니다.")
+        old_group = student["group_no"]
+        if old_group == body.group_no:
+            return {"id": student["id"], "name": student["name"], "groupNo": old_group, "role": student["role"]}
+        collision = connection.execute(
+            "SELECT 1 FROM students WHERE activity_id = ? AND name = ? AND group_no = ?",
+            (student["activity_id"], student["name"], body.group_no),
+        ).fetchone()
+        if collision:
+            raise HTTPException(409, "이름이 같은 학생이 대상 모둠에 이미 등록되어 있습니다.")
+        connection.execute("UPDATE students SET group_no = ? WHERE id = ?", (body.group_no, student_id))
+        rebalance_roles(connection, student["activity_id"], old_group)
+        rebalance_roles(connection, student["activity_id"], body.group_no)
+        updated = connection.execute("SELECT * FROM students WHERE id = ?", (student_id,)).fetchone()
+    await hub.broadcast(
+        hub.key(student["activity_id"], old_group),
+        {"type": "student_moved", "studentName": student["name"], "groupNo": body.group_no},
+    )
+    await hub.broadcast(hub.key(student["activity_id"], body.group_no), {"type": "members_changed"})
+    return {"id": updated["id"], "name": updated["name"], "groupNo": updated["group_no"], "role": updated["role"]}
+
+
+@app.delete("/api/teacher/students/{student_id}")
+async def delete_student_registration(
+    student_id: int,
+    x_teacher_code: str | None = Header(default=None),
+) -> dict[str, bool]:
+    teacher_authorized(x_teacher_code)
+    with db() as connection:
+        student = connection.execute("SELECT * FROM students WHERE id = ?", (student_id,)).fetchone()
+        if not student:
+            raise HTTPException(404, "등록된 학생을 찾을 수 없습니다.")
+        connection.execute("DELETE FROM students WHERE id = ?", (student_id,))
+        rebalance_roles(connection, student["activity_id"], student["group_no"])
+    await hub.broadcast(
+        hub.key(student["activity_id"], student["group_no"]),
+        {"type": "student_removed", "studentName": student["name"]},
+    )
+    return {"deleted": True}
+
+
+@app.delete("/api/teacher/activities/{activity_code}/students")
+async def reset_activity_students(
+    activity_code: str,
+    x_teacher_code: str | None = Header(default=None),
+) -> dict[str, int]:
+    teacher_authorized(x_teacher_code)
+    activity = activity_by_code(activity_code)
+    with db() as connection:
+        count = connection.execute("SELECT COUNT(*) FROM students WHERE activity_id = ?", (activity["id"],)).fetchone()[0]
+        connection.execute("DELETE FROM students WHERE activity_id = ?", (activity["id"],))
+    for group_no in range(1, 7):
+        await hub.broadcast(hub.key(activity["id"], group_no), {"type": "registration_reset"})
+    return {"deletedStudents": count}
+
+
+@app.delete("/api/teacher/groups/{activity_code}/{group_no}/conversation")
+async def reset_group_conversation(
+    activity_code: str,
+    group_no: int,
+    x_teacher_code: str | None = Header(default=None),
+) -> dict[str, int]:
+    teacher_authorized(x_teacher_code)
+    if group_no < 1 or group_no > 6:
+        raise HTTPException(400, "모둠 번호를 확인해 주세요.")
+    activity = activity_by_code(activity_code)
+    with db() as connection:
+        message_count = connection.execute(
+            "SELECT COUNT(*) FROM messages WHERE activity_id = ? AND group_no = ?",
+            (activity["id"], group_no),
+        ).fetchone()[0]
+        connection.execute("DELETE FROM messages WHERE activity_id = ? AND group_no = ?", (activity["id"], group_no))
+        connection.execute("DELETE FROM work_items WHERE activity_id = ? AND group_no = ?", (activity["id"], group_no))
+        connection.execute("DELETE FROM feedback WHERE activity_id = ? AND group_no = ?", (activity["id"], group_no))
+    removed_files = 0
+    for file_path in UPLOAD_DIR.glob(f"{activity['id']}_{group_no}_*"):
+        if file_path.is_file():
+            file_path.unlink()
+            removed_files += 1
+    await hub.broadcast(hub.key(activity["id"], group_no), {"type": "conversation_reset"})
+    return {"deletedMessages": message_count, "deletedFiles": removed_files}
 
 
 @app.put("/api/teacher/activity/{activity_code}")

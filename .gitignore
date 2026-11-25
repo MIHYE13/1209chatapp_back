@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+data/
+__pycache__/
+*.py[cod]
+.venv/
+*.log
+*service-account*.json
+*credentials*.json
+*.pem
+*.key
