@@ -61,15 +61,6 @@ configured_origins = [
     for origin in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
     if origin.strip()
 ]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=configured_origins,
-    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1|10\.[0-9.]+|192\.168\.[0-9.]+):[0-9]+$",
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Teacher-Code"],
-)
-
 
 def health_only_mode() -> bool:
     return os.getenv("DEPLOYMENT_MODE", "full").strip().lower() == "health-only"
@@ -80,6 +71,17 @@ async def deployment_mode_guard(request: Request, call_next):
     if health_only_mode() and request.url.path not in {"/", "/api/health"}:
         return JSONResponse(status_code=503, content={"detail": "배포 상태 확인 중입니다."})
     return await call_next(request)
+
+
+# Register CORS after the deployment guard so it wraps guard-generated 503 responses too.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=configured_origins,
+    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1|10\.[0-9.]+|192\.168\.[0-9.]+):[0-9]+$",
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Teacher-Code"],
+)
 
 
 def db() -> sqlite3.Connection:
