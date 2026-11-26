@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 
 
 API_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT_CANDIDATE = API_DIR.parents[1]
+PROJECT_ROOT_CANDIDATE = API_DIR.parent.parent
 PROJECT_ROOT = PROJECT_ROOT_CANDIDATE if (PROJECT_ROOT_CANDIDATE / "App").exists() else API_DIR
 ENV_PATHS = [PROJECT_ROOT / ".env.local", PROJECT_ROOT / ".env.firebase.local"]
 
