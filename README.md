@@ -24,5 +24,8 @@ docker run --rm -p 8000:8000 --env-file .env 1209chatapp-backend
 - `OPENAI_MODEL`
 - `TEACHER_CODE`
 - `ALLOWED_ORIGINS=https://1209chatapp.netlify.app`
+- `DEPLOYMENT_MODE=full`
+
+첫 공개 상태 확인 배포에서는 `DEPLOYMENT_MODE=health-only`를 사용합니다. 이 모드에서는 `/`와 `/api/health`만 열리고 학생·교사 API와 WebSocket은 HTTP 503 또는 연결 종료로 차단됩니다.
 
 현재 SQLite와 로컬 업로드 저장소는 단일 인스턴스 시연용입니다. 여러 인스턴스로 확장하기 전 Firestore와 Cloud Storage로 전환해야 합니다.

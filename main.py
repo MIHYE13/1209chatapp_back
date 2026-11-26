@@ -11,6 +11,7 @@ from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
 from pydantic import BaseModel, Field
@@ -68,6 +69,17 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Teacher-Code"],
 )
+
+
+def health_only_mode() -> bool:
+    return os.getenv("DEPLOYMENT_MODE", "full").strip().lower() == "health-only"
+
+
+@app.middleware("http")
+async def deployment_mode_guard(request: Request, call_next):
+    if health_only_mode() and request.url.path not in {"/", "/api/health"}:
+        return JSONResponse(status_code=503, content={"detail": "배포 상태 확인 중입니다."})
+    return await call_next(request)
 
 
 def db() -> sqlite3.Connection:
@@ -397,6 +409,9 @@ hub = RoomHub()
 
 @app.websocket("/ws")
 async def websocket_room(websocket: WebSocket, token: str = Query(...)) -> None:
+    if health_only_mode():
+        await websocket.close(code=1013, reason="배포 상태 확인 중입니다.")
+        return
     try:
         student, activity = student_by_token(token)
     except HTTPException:
